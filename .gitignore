@@ -1,0 +1,33 @@
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.out
+janus
+
+# Allow the shipped binaries
+!janus.exe
+!janus
+
+# Janus outputs
+*.janus
+*.unjanus
+
+# Backups / temp
+*.bak
+*.new
+*.tmp
+*~
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+
+# Build dirs
+build/
+cmake-build-*/
+
+# OS
+.DS_Store
+Thumbs.db
