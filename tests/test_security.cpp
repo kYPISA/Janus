@@ -1,6 +1,7 @@
 #include "janus_engine.hpp"
 #include "thread_pool.hpp"
 #include "lib/janus_notation_decoder.hpp"
+#include "C/CpuArch.h"
 #include <iostream>
 #include <stdexcept>
 #include <limits>
@@ -11,6 +12,25 @@ static void require(bool ok, const char* message) {
 
 int main() {
     try {
+        // Serialized fields are not necessarily aligned, even on x86/ARM64.
+        alignas(UInt64) Byte packed[24] = {};
+        SetUi16(packed + 1, 0x1234u)
+        SetUi32(packed + 5, 0x89ABCDEFu)
+        SetUi64(packed + 11, UInt64{0x0123456789ABCDEF})
+        require(GetUi16(packed + 1) == 0x1234u &&
+                GetUi32(packed + 5) == 0x89ABCDEFu &&
+                GetUi64(packed + 11) == UInt64{0x0123456789ABCDEF},
+                "unaligned integer round trip failed");
+        const Byte expected16[] = {0x34, 0x12};
+        const Byte expected32[] = {0xEF, 0xCD, 0xAB, 0x89};
+        const Byte expected64[] = {0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01};
+        require(std::memcmp(packed + 1, expected16, sizeof(expected16)) == 0 &&
+                std::memcmp(packed + 5, expected32, sizeof(expected32)) == 0 &&
+                std::memcmp(packed + 11, expected64, sizeof(expected64)) == 0,
+                "serialized integer byte order changed");
+        for (const auto offset : {0, 3, 4, 9, 10, 19, 20, 21, 22, 23})
+            require(packed[offset] == 0, "serialized integer overwrote adjacent bytes");
+
         uint32_t value = 0;
         const uint8_t overflowing[] = {0xFF, 0xFF, 0xFF, 0xFF, 0x1F};
         bool rejected = false;

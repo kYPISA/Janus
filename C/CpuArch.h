@@ -471,19 +471,8 @@ problem-4 : performace:
 #endif
 
 
-#ifdef MY_CPU_LE_UNALIGN
-
-#define GetUi16(p) (*(const UInt16 *)(const void *)(p))
-#define GetUi32(p) (*(const UInt32 *)(const void *)(p))
-#ifdef MY_CPU_LE_UNALIGN_64
-#define GetUi64(p) (*(const UInt64 *)(const void *)(p))
-#define SetUi64(p, v) { *(UInt64 *)(void *)(p) = (v); }
-#endif
-
-#define SetUi16(p, v) { *(UInt16 *)(void *)(p) = (v); }
-#define SetUi32(p, v) { *(UInt32 *)(void *)(p) = (v); }
-
-#else
+/* CPU support for unaligned access does not make typed pointer casts valid C.
+   Use byte-wise little-endian access for arbitrary serialized buffer offsets. */
 
 #define GetUi16(p) ( (UInt16) ( \
              ((const Byte *)(p))[0] | \
@@ -504,8 +493,6 @@ problem-4 : performace:
     _ppp_[1] = (Byte)(_vvv_ >> 8); \
     _ppp_[2] = (Byte)(_vvv_ >> 16); \
     _ppp_[3] = (Byte)(_vvv_ >> 24); }
-
-#endif
 
 
 #ifndef GetUi64
