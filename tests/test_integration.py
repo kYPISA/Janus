@@ -104,7 +104,8 @@ class Integration(unittest.TestCase):
 
     def test_raw_round_trips(self):
         for mode in ("--raw-brotli", "--raw-lzma"):
-            for data in (b"", b"raw codec test" * 50):
+            # Longer periodic input exercises LZMA's long-match relative offsets.
+            for data in (b"", b"raw codec test" * 50, bytes(range(256)) * 32):
                 with self.subTest(mode=mode, size=len(data)):
                     source, packed, dest = [self.root / n for n in ("raw.in", "raw.packed", "raw.out")]
                     source.write_bytes(data)

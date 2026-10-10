@@ -334,8 +334,9 @@ else
                 {
                   // SPEC code
                   CLzRef *dest = son + ((size_t)(_cyclicBufferPos) << 1);
+                  /* The relative offset can be negative; signed left shift is undefined. */
                   const CLzRef *src = dest + ((diff
-                      + (ptrdiff_t)(UInt32)((_cyclicBufferPos < delta) ? cbs : 0)) << 1);
+                      + (ptrdiff_t)(UInt32)((_cyclicBufferPos < delta) ? cbs : 0)) * 2);
                   // CLzRef *ptr = son + ((size_t)(pos) << 1) - CYC_TO_POS_OFFSET * 2;
                   #if 0
                   *(UInt64 *)(void *)dest = *((const UInt64 *)(const void *)src);
