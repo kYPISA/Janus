@@ -1,54 +1,51 @@
-name: Build Janus
-
-on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
-  workflow_dispatch:
-
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
-  build-linux:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Configure
+        run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/native --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build/native -C Release --output-on-failure
+      - name: Install
+        run: cmake --install build/native --config Release --prefix dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: janus-${{ matrix.os }}
+          path: dist/
+          if-no-files-found: error
+  sanitizers:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build tools
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Configure
+        run: cmake -S . -B build/sanitize -DCMAKE_BUILD_TYPE=Debug -DJANUS_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build/sanitize --parallel 2
+      - name: Test with sanitizers
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-
-      - name: Build Linux binary
-        run: make -j4
-
-      - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: janus-linux-x86_64
-          path: janus
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup MinGW
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
-
-      - name: Build Windows binary
-        shell: msys2 {0}
-        run: mingw32-make -j4
-
-      - name: Upload Windows binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: janus-windows-x86_64
-          path: janus.exe
+          export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+          export UBSAN_OPTIONS=halt_on_error=1
+          ctest --test-dir build/sanitize --output-on-failure -E '^integration$'
+          # ctypes needs ASan loaded before Python. Disable leak detection only
+          # here: the uninstrumented Python interpreter retains allocations.
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
+            ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+            ctest --test-dir build/sanitize --output-on-failure -R '^integration$'

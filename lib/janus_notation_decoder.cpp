@@ -3,27 +3,39 @@
 
 namespace janus {
 
-NotationDecoder::NotationDecoder()
-    : error_code_(NotationError::ok), input_position_(0), finalized_(false) {}
+NotationDecoder::NotationDecoder(size_t max_output_size)
+    : error_code_(NotationError::ok), input_position_(0), finalized_(false), max_output_size_(max_output_size) {}
+
+void NotationDecoder::check_growth(size_t length) {
+    if (length > max_output_size_ - output_.size())
+        throw NotationException(NotationError::literal_too_large, "notation output limit exceeded");
+}
 
 void NotationDecoder::set_vocab_header(const uint8_t* header, size_t length) {
     adaptive_vocab_.clear();
-    if (length == 0 || header == nullptr) {
+    if (length == 0) {
         return;
     }
+    if (!header || length > 1024 * 1024)
+        throw NotationException(NotationError::invalid_token, "invalid vocabulary input");
     size_t position = 0;
     uint32_t count = 0;
     position += VarintCodec::decode_unsigned(header + position, length - position, count);
+    if (count > 48) throw NotationException(NotationError::adaptive_vocab_overflow, "too many vocabulary entries");
     for (uint32_t i = 0; i < count; ++i) {
         if (position >= length) {
             set_error(NotationError::truncated_stream, "adaptive vocab truncated at opcode");
             return;
         }
         uint8_t opcode = header[position++];
+        if (opcode < 0xC0 || opcode > 0xEF || adaptive_vocab_.count(opcode)) {
+            set_error(NotationError::invalid_token, "invalid or duplicate adaptive opcode");
+            return;
+        }
         uint32_t text_length = 0;
         size_t consumed = VarintCodec::decode_unsigned(header + position, length - position, text_length);
         position += consumed;
-        if (position + text_length > length) {
+        if (text_length == 0 || text_length > 65535 || text_length > length - position) {
             set_error(NotationError::truncated_stream, "adaptive vocab truncated at text");
             return;
         }
@@ -31,11 +43,16 @@ void NotationDecoder::set_vocab_header(const uint8_t* header, size_t length) {
             reinterpret_cast<const char*>(header + position), text_length);
         position += text_length;
     }
+    if (position != length) set_error(NotationError::invalid_token, "trailing vocabulary data");
 }
 
 void NotationDecoder::feed_encoded_data(const uint8_t* data, size_t length) {
     if (finalized_) {
         set_error(NotationError::already_finalized, "decoder already finalized");
+        return;
+    }
+    if (length && (!data || length > 64 * 1024 * 1024 - pending_input_.size())) {
+        set_error(NotationError::literal_too_large, "notation input limit exceeded");
         return;
     }
     if (data != nullptr && length > 0) {
@@ -48,7 +65,12 @@ void NotationDecoder::finalize() {
         return;
     }
     finalized_ = true;
-    process_all_tokens();
+    try {
+        process_all_tokens();
+    } catch (const NotationException& e) {
+        set_error(e.error_code(), e.what());
+    }
+    if (has_error()) output_.clear();
 }
 
 const uint8_t* NotationDecoder::get_decoded_data(size_t& out_length) const {
@@ -112,7 +134,7 @@ void NotationDecoder::process_next_token() {
             uint32_t length = 0;
             input_position_ += read_varint_unsigned(length);
             if (has_error()) return;
-            if (input_position_ + length > pending_input_.size()) {
+            if (length > pending_input_.size() - input_position_) {
                 set_error(NotationError::truncated_stream, "literal string truncated");
                 return;
             }
@@ -134,7 +156,7 @@ void NotationDecoder::process_next_token() {
             break;
         }
         case NotationToken::literal_float: {
-            if (input_position_ + 4 > pending_input_.size()) {
+            if (sizeof(float) > pending_input_.size() - input_position_) {
                 set_error(NotationError::truncated_stream, "float literal truncated");
                 return;
             }
@@ -228,16 +250,19 @@ size_t NotationDecoder::read_varint_signed(int32_t& value) {
 
 void NotationDecoder::emit_text(const std::string& text) {
     if (!text.empty()) {
+        check_growth(text.size());
         output_.insert(output_.end(), text.begin(), text.end());
     }
 }
 
 void NotationDecoder::emit_byte(uint8_t byte) {
+    check_growth(1);
     output_.push_back(byte);
 }
 
 void NotationDecoder::emit_bytes(const uint8_t* data, size_t length) {
     if (length > 0) {
+        check_growth(length);
         output_.insert(output_.end(), data, data + length);
     }
 }

@@ -1,0 +1,8 @@
+{
+    global:
+        janus_compress_file;
+        janus_decompress_file;
+        janus_last_error;
+        janus_version_string;
+    local: *;
+};

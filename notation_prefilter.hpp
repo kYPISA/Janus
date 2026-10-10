@@ -229,12 +229,12 @@ inline bool notation_encode_segment(const uint8_t* data, size_t size, NotationPr
 
 inline bool notation_decode_segment(const uint8_t* body, size_t body_size,
                                     const uint8_t* vocab, size_t vocab_size,
-                                    std::vector<uint8_t>& out) {
+                                    std::vector<uint8_t>& out, size_t max_output = JANUS_MAX_NOTATION) {
     if (body == nullptr || body_size == 0) {
         return false;
     }
     try {
-        janus::NotationDecoder decoder;
+        janus::NotationDecoder decoder(max_output);
         if (vocab != nullptr && vocab_size > 0) {
             decoder.set_vocab_header(vocab, vocab_size);
         }

@@ -1,58 +1,112 @@
-cmake_minimum_required(VERSION 3.10)
-project(JanusProject C CXX)
-
+cmake_minimum_required(VERSION 3.16)
+project(Janus VERSION 0.2.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-if(MINGW)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(CMAKE_CROSSCOMPILING AND APPLE AND CMAKE_HOST_WIN32
+   AND CMAKE_C_COMPILER MATCHES "zig-cc\\.cmd$")
+    set(JANUS_ZIG_DARWIN TRUE)
+    set(CMAKE_AR "${CMAKE_CURRENT_SOURCE_DIR}/tools/zig-ar.cmd")
+    set(CMAKE_RANLIB "${CMAKE_CURRENT_SOURCE_DIR}/tools/zig-ranlib.cmd")
+    set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_AR> --format=darwin qc <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> --format=darwin qc <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_C_ARCHIVE_FINISH "")
+    set(CMAKE_CXX_ARCHIVE_FINISH "")
+    # CMake on Windows otherwise turns @rpath/libjanus.dylib into a backslash path.
+    set(CMAKE_CXX_CREATE_SHARED_LIBRARY
+        "<CMAKE_CXX_COMPILER> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
 endif()
+include(CTest)
+find_package(Threads REQUIRED)
+option(JANUS_SANITIZERS "Enable address and undefined-behavior sanitizers" OFF)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -DNDEBUG")
-
-set(SEVENZIP_C_SOURCES
-    C/7zCrc.c
-    C/7zCrcOpt.c
-    C/7zStream.c
-    C/Alloc.c
-    C/CpuArch.c
-    C/LzFind.c
-    C/LzFindMt.c
-    C/LzFindOpt.c
-    C/LzmaDec.c
-    C/LzmaEnc.c
-    C/Threads.c
-)
-
-file(GLOB BROTLI_COMMON_SOURCES "brotli-1.1.0/c/common/*.c")
-file(GLOB BROTLI_ENC_SOURCES "brotli-1.1.0/c/enc/*.c")
-file(GLOB BROTLI_DEC_SOURCES "brotli-1.1.0/c/dec/*.c")
-
-set(MAIN_SOURCES main.cpp)
-
-set(NOTATION_SOURCES
-    lib/janus_notation.cpp
-    lib/janus_notation_encoder.cpp
-    lib/janus_notation_decoder.cpp
-)
-
-add_executable(janus
-    ${SEVENZIP_C_SOURCES}
-    ${BROTLI_COMMON_SOURCES}
-    ${BROTLI_ENC_SOURCES}
-    ${BROTLI_DEC_SOURCES}
-    ${NOTATION_SOURCES}
-    ${MAIN_SOURCES}
-)
-
-target_include_directories(janus PRIVATE
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/lib
-    ${CMAKE_SOURCE_DIR}/C
-    ${CMAKE_SOURCE_DIR}/brotli-1.1.0/c/include
-)
-
+file(GLOB BROTLI_SOURCES CONFIGURE_DEPENDS
+    brotli-1.2.0/c/common/*.c brotli-1.2.0/c/enc/*.c brotli-1.2.0/c/dec/*.c)
+add_library(janus_codecs STATIC ${BROTLI_SOURCES}
+    C/LzmaEnc.c C/LzmaDec.c C/LzFind.c C/LzFindOpt.c C/LzFindMt.c
+    C/CpuArch.c C/Threads.c)
+target_include_directories(janus_codecs PUBLIC C brotli-1.2.0/c/include)
+target_compile_definitions(janus_codecs PUBLIC BROTLI_STATIC)
+target_link_libraries(janus_codecs PUBLIC Threads::Threads)
+add_library(janus_notation STATIC lib/janus_notation.cpp
+    lib/janus_notation_encoder.cpp lib/janus_notation_decoder.cpp)
+target_include_directories(janus_notation PUBLIC lib)
+add_library(janus_core STATIC main.cpp)
+set_target_properties(janus_core janus_notation janus_codecs PROPERTIES
+    C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+target_link_libraries(janus_core PUBLIC janus_codecs janus_notation)
+target_include_directories(janus_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 if(WIN32)
-    target_link_libraries(janus PRIVATE psapi)
+    target_link_libraries(janus_core PUBLIC psapi)
 endif()
+add_library(janus SHARED janus_lib.cpp)
+target_compile_definitions(janus PRIVATE JANUS_LIB_BUILD)
+target_link_libraries(janus PRIVATE janus_core)
+if(JANUS_ZIG_DARWIN)
+    target_link_options(janus PRIVATE "-Wl,-install_name,@rpath/libjanus.dylib")
+endif()
+if(APPLE AND NOT JANUS_ZIG_DARWIN)
+    foreach(symbol janus_compress_file janus_decompress_file janus_last_error janus_version_string)
+        target_link_options(janus PRIVATE "-Wl,-exported_symbol,_${symbol}")
+    endforeach()
+elseif(JANUS_ZIG_DARWIN)
+    # Zig 0.14.1 rejects Darwin export-list flags; source visibility still hides
+    # Janus internals, but the cross-built dylib also exports Zig runtime helpers.
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(janus PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/janus.map")
+    set_property(TARGET janus APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/janus.map")
+endif()
+if(WIN32)
+    set_target_properties(janus PROPERTIES PREFIX "")
+endif()
+set_target_properties(janus PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+add_executable(janus_cli cli.cpp)
+target_link_libraries(janus_cli PRIVATE janus_core)
+set_target_properties(janus_cli PROPERTIES OUTPUT_NAME janus)
+foreach(target janus janus_cli)
+    set_target_properties(${target} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+endforeach()
+foreach(target janus_core janus_notation janus janus_cli)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endforeach()
+if(JANUS_SANITIZERS)
+    if(MSVC)
+        message(FATAL_ERROR "JANUS_SANITIZERS requires GCC or Clang")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+    foreach(target janus_codecs janus_notation janus_core janus janus_cli)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(test_notation tests/test_notation.cpp)
+    target_link_libraries(test_notation PRIVATE janus_notation)
+    add_test(NAME notation COMMAND test_notation)
+    add_executable(test_security tests/test_security.cpp)
+    target_link_libraries(test_security PRIVATE janus_core)
+    add_test(NAME security COMMAND test_security)
+    set_tests_properties(security PROPERTIES TIMEOUT 15)
+    add_executable(test_c_api tests/test_c_api.c)
+    target_link_libraries(test_c_api PRIVATE janus)
+    set_target_properties(test_c_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME c_api COMMAND test_c_api)
+    add_test(NAME integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_integration.py"
+        --exe $<TARGET_FILE:janus_cli> --library $<TARGET_FILE:janus>)
+    set_tests_properties(integration PROPERTIES TIMEOUT 300)
+endif()
+install(TARGETS janus janus_cli RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
+install(FILES janus_lib.h DESTINATION include)
+install(FILES LICENSE LICENSE-LZMA-SDK.txt DESTINATION share/licenses/Janus)
+install(FILES brotli-1.2.0/LICENSE DESTINATION share/licenses/Janus RENAME LICENSE-Brotli.txt)

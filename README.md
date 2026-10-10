@@ -43,8 +43,8 @@ Implemented and verified as of 2026-08-29:
   compression trial confirms a real improvement; rejected segments are stored unfiltered.
 - **Janus Notation** — standalone embeddable library (`libjanus_notation`) with a formal
   grammar: a fixed core vocabulary plus an adaptive vocabulary built per segment.
-  Integrated into the container as `prefilter_id = 3`. Grammar and format details:
-  [JANUS_NOTATION_SPEC.md](JANUS_NOTATION_SPEC.md).
+  Integrated into the container as `prefilter_id = 3`. The implementation is in
+  [`lib/`](lib/).
 - **Default file extension changed from `.janus` to `.jan`** (decompressed default:
   `.unjan`). Archives are detected by magic bytes, not file extension, so existing
   `.janus` archives still open and decompress with no flags.
@@ -73,64 +73,56 @@ the decompressor accepts both layouts.
 
 ## Libraries you need to install
 
-None. Brotli 1.1.0 and the LZMA SDK are included in this repo, so the only thing you need is a compiler.
+No separate codec libraries. Brotli 1.2.0 and the required LZMA SDK sources are included in this repo; build prerequisites are listed below.
 
 ## Building
 
-You don't need to install any libraries. Brotli 1.1.0 and the LZMA SDK are included in this repo, so the only thing you need is a compiler with C++17 support.
+The build uses CMake 3.16+, a C++17 compiler, and Python 3 for integration tests. Brotli 1.2.0 and the LZMA SDK are bundled; no separate codec installation is needed.
 
-Pre-built Linux and Windows binaries are produced automatically by GitHub Actions on every push (see `.github/workflows/build.yml`) — grab them from the Actions artifacts or the releases page.
+GitHub Actions builds and tests natively on Windows, Linux, and macOS, then uploads the installed executable, shared library, C header, and licenses. A separate Linux job runs AddressSanitizer and UndefinedBehaviorSanitizer. See `.github/workflows/build.yml`.
 
-### Windows (MinGW)
+Sanitizer CI enables leak detection for the native C/C++ tests. The Python/ctypes integration run preloads ASan and disables leak detection for the uninstrumented Python interpreter; address and undefined-behavior checks remain enabled.
 
-I built this with TDM-GCC 10.3.0. If you have MinGW:
-
-```bash
-mingw32-make -j4
-```
-
-Clean:
+### Native builds (Windows / Linux / macOS)
 
 ```bash
-mingw32-make clean
+cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native --config Release --parallel 4
+ctest --test-dir build/native -C Release --output-on-failure
+cmake --install build/native --config Release --prefix dist
 ```
 
-### Linux / macOS
+Windows can use Visual Studio or MinGW (`-G "MinGW Makefiles"` on the configure command). Executables go in `build/native/bin`, libraries in `build/native/lib`; multi-configuration generators add a `Release` subdirectory. Installation places them in `dist/bin` and `dist/lib` with `dist/include/janus_lib.h`.
+
+`python build_libs.py` runs the same configure/build/test sequence. The Makefile is also a CMake wrapper: `make`, `make test`, or `mingw32-make test`. Clean with `cmake --build build/native --target clean`.
+
+### Shared-library API
+
+The C API exports `janus_compress_file`, `janus_decompress_file`, `janus_last_error`, and `janus_version_string`. Include `janus_lib.h` and link the installed import/shared library. The file operations return **1 on success, 0 on failure**; read `janus_last_error()` on the same thread after a failure. `janus_compress_file` takes a thread count, and an optional log path can be null. Decode/codec failures leave an existing destination unchanged; an optional log-write failure is reported after the output has been committed.
+
+### Zig cross-builds from Windows
+
+The supplied toolchains build x86-64 Linux and macOS artifacts using the Python `ziglang` package (verified with Zig 0.14.1):
 
 ```bash
-make -j4
+python -m pip install ziglang==0.14.1
+python build_libs.py --build-dir build/linux --generator "MinGW Makefiles" --toolchain cmake/zig-linux.cmake --no-test
+python build_libs.py --build-dir build/macos --generator "MinGW Makefiles" --toolchain cmake/zig-macos.cmake --no-test
 ```
 
-Clean:
+These batch-file toolchains are for a Windows host with `mingw32-make` available. Cross-builds verify compilation/linking, not runtime behavior. Run the native test suite on the target OS before treating these artifacts as runtime-verified.
 
-```bash
-make clean
-```
-
-If your `g++` doesn't have `libstdc++` static libraries installed, the `-static-libstdc++` flag in the Makefile might fail. In that case just remove that flag (and `-static-libgcc` if needed) from the `LDFLAGS` line.
-
-### CMake
-
-There's also a `CMakeLists.txt` if you prefer:
-
-```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j4
-```
-
-You'll need CMake 3.10+ and a compiler with C++17 support.
+Zig 0.14.1 does not support Darwin export-list linker flags, so the macOS cross-built library also exposes some bundled C++ runtime helpers. Native macOS builds restrict exports to the four C API functions.
 
 ## Platform support
 
-| OS      | Status                              | Binary                         |
-|---------|-------------------------------------|--------------------------------|
-| Windows | Fully working, tested               | Built by GitHub Actions         |
-| Linux   | Compiles and runs (build from source) | Pre-built via GitHub Actions   |
-| macOS   | Should compile, not tested yet      | Coming in a future update      |
+| OS      | Local verification on the Windows development host | Native CI |
+|---------|----------------------------------------------------|-----------|
+| Windows | MinGW executable/shared library; all CTest targets pass | Build, test, install (MSVC) |
+| Linux   | x86-64 executable/shared-library cross-build and format/export checks | Build, test, install; sanitizers |
+| macOS   | x86-64 executable/shared-library cross-build and format/export checks | Build, test, install |
 
-Official pre-built binaries for Linux and macOS will be provided in upcoming releases.
+Linux/macOS runtime results and MSVC results require their native CI runs; cross-compilation alone does not establish them.
 
 ## Usage
 
@@ -180,7 +172,7 @@ Each segment entry now also reports whether the Janus Notation prefilter was app
 
 ### The Janus Notation prefilter (`prefilter_id = 3`)
 
-Segments can go through [Janus Notation](JANUS_NOTATION_SPEC.md) before Brotli/LZMA:
+Segments can go through [Janus Notation](lib/janus_notation.hpp) before Brotli/LZMA:
 the segment is re-encoded as a token stream (adaptive vocabulary per segment, literal
 escaping for bytes the notation grammar reserves). Vocabulary selection is
 frequency-thresholded rather than a flat top-48: only tokens of 4–16 bytes that occur at
@@ -265,9 +257,11 @@ prefilters, so it ships only if it measurably helps.
 - `notation_prefilter.hpp` — lossless Janus Notation prefilter integration
 - `lib/` — `libjanus_notation` (standalone notation encoder/decoder library)
 - `stream_io.hpp` — buffered streaming I/O
-- `C/` — LZMA SDK (public domain, see `LICENSE-LZMA-SDK.txt`)
-- `brotli-1.1.0/` — Brotli source (MIT)
+- `C/` — required LZMA SDK sources and headers (public domain, see `LICENSE-LZMA-SDK.txt`)
+- `brotli-1.2.0/` — Brotli sources, headers, and license (MIT)
 - `Makefile` / `CMakeLists.txt` — pick your poison
+- `build_libs.py`, `cmake/`, `tools/` — build wrapper and Windows-hosted Zig cross-toolchains
+- `tests/`, `.github/workflows/build.yml` — native tests and CI
 
 ## Important disclaimer
 
@@ -279,9 +273,9 @@ I set myself a challenge: build a server from scratch, using whatever junk I had
 
 ## License stuff
 
-- The original Janus code (`main.cpp`, `janus_engine.hpp`, `stream_io.hpp`) doesn't have a license yet. It's just a prototype.
+- The original Janus code is MIT licensed — see `LICENSE`.
 - LZMA SDK is public domain — see `LICENSE-LZMA-SDK.txt`.
-- Brotli is MIT licensed — see `brotli-1.1.0/LICENSE`.
+- Brotli is MIT licensed — see `brotli-1.2.0/LICENSE`.
 
 ## Support & feedback
 

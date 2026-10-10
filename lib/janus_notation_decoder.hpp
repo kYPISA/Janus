@@ -14,7 +14,7 @@ struct AdaptiveVocabEntry {
 
 class NotationDecoder {
 public:
-    NotationDecoder();
+    explicit NotationDecoder(size_t max_output_size = 64 * 1024 * 1024);
 
     void set_vocab_header(const uint8_t* header, size_t length);
     void feed_encoded_data(const uint8_t* data, size_t length);
@@ -31,6 +31,8 @@ private:
     NotationError error_code_;
     size_t input_position_;
     bool finalized_;
+    size_t max_output_size_;
+    void check_growth(size_t length);
 
     void process_all_tokens();
     void process_next_token();

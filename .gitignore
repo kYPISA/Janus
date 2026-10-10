@@ -69,6 +69,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+__pycache__/
+*.pyc
+/dist/
 
 # Janus container / benchmark outputs
 *.janus
@@ -80,6 +83,10 @@ Testing/
 *.restored
 log_*.json
 
+# Benchmark artifacts
+*.bin
+bench_*.*
+
 # IDE / editor
 .vs/
 .vscode/
@@ -89,3 +96,9 @@ log_*.json
 .DS_Store
 Thumbs.db
 
+
+node_modules/
+bun.lock
+package.json
+main_test.txt
+main_old_func.txt

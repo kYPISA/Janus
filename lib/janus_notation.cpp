@@ -26,11 +26,14 @@ size_t VarintCodec::encode_unsigned(uint32_t value, uint8_t* output, size_t outp
 }
 
 size_t VarintCodec::decode_unsigned(const uint8_t* input, size_t input_length, uint32_t& output_value) {
+    if (!input && input_length) throw NotationException(NotationError::malformed_varint, "null varint input");
     output_value = 0;
     size_t shift = 0;
     size_t consumed = 0;
     while (consumed < input_length) {
         uint8_t byte = input[consumed++];
+        if (shift == 28 && (byte & 0xF0) != 0)
+            throw NotationException(NotationError::malformed_varint, "varint exceeds 32 bits");
         output_value |= static_cast<uint32_t>(byte & 0x7F) << shift;
         if ((byte & 0x80) == 0) {
             return consumed;

@@ -1,6 +1,8 @@
 #ifndef JANUS_ENGINE_HPP
 #define JANUS_ENGINE_HPP
 
+#include "analysis_engine.hpp"
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -10,9 +12,18 @@
 #include <numeric>
 #include <algorithm>
 #include <unordered_map>
+#include <stdexcept>
+
+constexpr size_t JANUS_MAX_SEGMENT = 16 * 1024 * 1024;
+constexpr size_t JANUS_MAX_NOTATION = 64 * 1024 * 1024;
+constexpr size_t JANUS_MAX_RAW = 128 * 1024 * 1024;
+constexpr uint64_t JANUS_MAX_OUTPUT = uint64_t{8} * 1024 * 1024 * 1024;
 
 constexpr uint32_t JANUS_MAGIC = 0x53554E41;
 constexpr uint8_t  JANUS_VERSION = 0x03;
+
+constexpr size_t JANUS_SEGMENT_SIZE_SINGLE = 8 * 1024 * 1024;
+constexpr size_t JANUS_SEGMENT_SIZE_MULTI  = 8 * 1024 * 1024;
 
 enum JanusAlgoID : uint8_t {
     ALGO_STORE        = 0,
@@ -75,19 +86,8 @@ enum FileFormat {
 class JanusEngine {
 public:
     static double calculate_entropy(const uint8_t* data, size_t size) {
-        if (size == 0) return 0.0;
-        size_t count[256] = {0};
-        for (size_t i = 0; i < size; ++i) {
-            count[data[i]]++;
-        }
-        double entropy = 0.0;
-        for (int i = 0; i < 256; ++i) {
-            if (count[i] > 0) {
-                double p = static_cast<double>(count[i]) / size;
-                entropy -= p * (std::log2(p));
-            }
-        }
-        return entropy;
+        CPUAnalysisEngine engine;
+        return engine.compute_entropy(data, size);
     }
 
     static std::vector<uint8_t> apply_rle(const uint8_t* src, size_t size) {
@@ -111,13 +111,21 @@ public:
         return dest;
     }
 
-    static std::vector<uint8_t> undo_rle(const uint8_t* src, size_t size) {
+    static std::vector<uint8_t> undo_rle(const uint8_t* src, size_t size, size_t expected_size) {
+        if (size % 2 != 0 || expected_size > JANUS_MAX_SEGMENT) {
+            throw std::runtime_error("Invalid RLE length");
+        }
         std::vector<uint8_t> dest;
+        dest.reserve(expected_size);
         for (size_t i = 0; i < size; i += 2) {
             uint8_t count = src[i];
+            if (count == 0 || count > expected_size - dest.size()) {
+                throw std::runtime_error("RLE expansion exceeds declared size");
+            }
             uint8_t val = src[i + 1];
             dest.insert(dest.end(), count, val);
         }
+        if (dest.size() != expected_size) throw std::runtime_error("RLE size mismatch");
         return dest;
     }
 
@@ -146,7 +154,6 @@ public:
         double orig_entropy = calculate_entropy(input.data(), sample_size);
 
         auto rle_sample = apply_rle(input.data(), sample_size);
-        double rle_entropy = calculate_entropy(rle_sample.data(), rle_sample.size());
 
         auto delta_sample = apply_delta(input.data(), sample_size);
         double delta_entropy = calculate_entropy(delta_sample.data(), delta_sample.size());
@@ -172,7 +179,7 @@ public:
         size_t dot_pos = filepath.find_last_of('.');
         if (dot_pos != std::string::npos) {
             ext = filepath.substr(dot_pos);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         }
 
         if (ext == ".txt" || ext == ".json" || ext == ".lua" ||
@@ -198,8 +205,10 @@ public:
         return ALGO_LZMA_ULTRA;
     }
 
-    static std::vector<SegmentBoundary> calculate_segments(size_t file_size, size_t target_chunk_size = 134217728) {
+    static std::vector<SegmentBoundary> calculate_segments(size_t file_size, size_t target_chunk_size = JANUS_SEGMENT_SIZE_SINGLE) {
         std::vector<SegmentBoundary> segments;
+        if (target_chunk_size == 0 || target_chunk_size > JANUS_MAX_SEGMENT)
+            throw std::runtime_error("Invalid segment size");
 
         if (file_size == 0) return segments;
 
@@ -209,10 +218,6 @@ public:
         }
 
         size_t num_segments = (file_size + target_chunk_size - 1) / target_chunk_size;
-
-        if (file_size % target_chunk_size < target_chunk_size / 4 && num_segments > 1) {
-            num_segments--;
-        }
 
         size_t base_size = file_size / num_segments;
         size_t remainder = file_size % num_segments;
@@ -232,7 +237,7 @@ public:
         size_t dot_pos = filepath.find_last_of('.');
         if (dot_pos != std::string::npos) {
             ext = filepath.substr(dot_pos);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         }
 
         if (ext == ".safetensors") return FORMAT_SAFETENSORS;
@@ -247,26 +252,27 @@ public:
         return FORMAT_GENERIC;
     }
 
-    static std::vector<SegmentBoundary> split_safetensors(const uint8_t* file_data, size_t file_size) {
+    static std::vector<SegmentBoundary> split_safetensors(const uint8_t* file_data, size_t file_size, size_t target_chunk_size = JANUS_SEGMENT_SIZE_SINGLE) {
         std::vector<SegmentBoundary> segments;
 
         if (file_size < 8) {
-            return calculate_segments(file_size);
+            return calculate_segments(file_size, target_chunk_size);
         }
 
         uint64_t json_length = 0;
         std::memcpy(&json_length, file_data, sizeof(uint64_t));
 
         if (json_length > file_size - 8 || json_length == 0) {
-            return calculate_segments(file_size);
+            return calculate_segments(file_size, target_chunk_size);
         }
 
+        if (json_length > JANUS_MAX_SEGMENT - 8) return calculate_segments(file_size, target_chunk_size);
         size_t header_end = 8 + static_cast<size_t>(json_length);
         segments.push_back({0, header_end});
 
         size_t remaining = file_size - header_end;
         if (remaining > 0) {
-            auto tensor_segments = calculate_segments(remaining, 134217728);
+            auto tensor_segments = calculate_segments(remaining, target_chunk_size);
             for (auto& seg : tensor_segments) {
                 seg.offset += header_end;
                 segments.push_back(seg);
@@ -276,18 +282,18 @@ public:
         return segments;
     }
 
-    static std::vector<SegmentBoundary> split_gguf(const uint8_t* file_data, size_t file_size) {
+    static std::vector<SegmentBoundary> split_gguf(const uint8_t* file_data, size_t file_size, size_t target_chunk_size = JANUS_SEGMENT_SIZE_SINGLE) {
         std::vector<SegmentBoundary> segments;
 
         if (file_size < 16) {
-            return calculate_segments(file_size);
+            return calculate_segments(file_size, target_chunk_size);
         }
 
         uint32_t version = 0;
         std::memcpy(&version, file_data + 4, sizeof(uint32_t));
 
         if (version > 10) {
-            return calculate_segments(file_size);
+            return calculate_segments(file_size, target_chunk_size);
         }
 
         size_t estimated_header_size = 1024;
@@ -299,7 +305,7 @@ public:
 
         if (file_size > estimated_header_size) {
             size_t remaining = file_size - estimated_header_size;
-            auto tensor_segments = calculate_segments(remaining, 134217728);
+            auto tensor_segments = calculate_segments(remaining, target_chunk_size);
             for (auto& seg : tensor_segments) {
                 seg.offset += estimated_header_size;
                 segments.push_back(seg);
